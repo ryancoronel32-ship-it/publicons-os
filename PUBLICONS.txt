@@ -1,0 +1,455 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getFirestore, collection, addDoc, getDocs, doc, updateDoc, onSnapshot, query, deleteDoc } from 'firebase/firestore';
+import { ArrowUp, ArrowDown, Search, X, PlusCircle, Sparkles, Copy, CalendarPlus, Trash2 } from 'lucide-react';
+
+// --- Configuración de Firebase (ACTUALIZADO CON TUS CREDENCIALES) ---
+const firebaseConfig = {
+  apiKey: "AIzaSyBykEl3H5tQ_cemXxZyCdk91YYTepkeoXw",
+  authDomain: "publicons-os-20a5e.firebaseapp.com",
+  projectId: "publicons-os-20a5e",
+  storageBucket: "publicons-os-20a5e.appspot.com",
+  messagingSenderId: "661019386820",
+  appId: "1:661019386820:web:d597120753040a91f3ba91",
+  measurementId: "G-Z4K24CXX28"
+};
+
+
+// --- Inicialización de Firebase ---
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const publicationsCollectionRef = collection(db, "Publicaciones");
+
+// --- Configuración de la API de Google Calendar ---
+const GOOGLE_API_KEY = "AIzaSyB6BcIQckFhbFa290TyIOataNyrhjTAnNM";
+const GOOGLE_CLIENT_ID = "842276354469-trl9s9ke8nmjsesa7j090g92qcf21e65.apps.googleusercontent.com";
+const DISCOVERY_DOC = "https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest";
+const SCOPES = "https://www.googleapis.com/auth/calendar.events";
+
+// --- Componentes de la UI ---
+
+const StatusBadge = ({ status }) => {
+    const statusColors = {
+        "Recibido": "bg-blue-100 text-blue-800", "Cotizado": "bg-yellow-100 text-yellow-800",
+        "Aprobado": "bg-green-100 text-green-800", "Enviado a Prensa": "bg-indigo-100 text-indigo-800",
+        "Publicado": "bg-purple-100 text-purple-800", "Entregado y Facturado": "bg-pink-100 text-pink-800",
+        "Archivado": "bg-gray-100 text-gray-800",
+    };
+    return <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${statusColors[status] || 'bg-gray-100 text-gray-800'}`}>{status}</span>;
+};
+
+const PaymentStatusBadge = ({ status }) => {
+    const statusColors = {
+        "Por Cobrar": "bg-yellow-100 text-yellow-800",
+        "Pagado": "bg-green-100 text-green-800",
+        "Vencido": "bg-red-100 text-red-800",
+    };
+    return <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${statusColors[status] || 'bg-gray-100 text-gray-800'}`}>{status}</span>;
+};
+
+
+const Modal = ({ children, isOpen, onClose, title = '' }) => {
+    if (!isOpen) return null;
+    return (
+        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex justify-center items-center p-4">
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col">
+                 <div className="sticky top-0 bg-white p-4 border-b flex justify-between items-center z-10">
+                    <h3 className="text-lg font-semibold text-[#0A2342]">{title}</h3>
+                    <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={24} /></button>
+                </div>
+                <div className="p-6 overflow-y-auto">{children}</div>
+            </div>
+        </div>
+    );
+};
+
+const PublicationForm = ({ onSave, onClose, onDelete, initialData = null, gapi, tokenClient, isGoogleSignedIn, handleGoogleAuthClick }) => {
+    const [formData, setFormData] = useState({
+        Cliente: '', Contacto_Cliente: '', Nro_Causa: '', Tipo_Publicacion: 'Extracto',
+        Periodico_Asignado: '', Ancho: '', Alto: '', Dias_Publicacion: '', Fecha_Inicio: '',
+        Estado_Actual: 'Recibido', Direccion_Entrega: '', Canal_Adquisicion: 'LinkedIn',
+        Observaciones: '', Tarifa_Aplicada: 2.1, Valor_a_Pagar: '', Costo_Diario: 0,
+        Ganancia: 0, Estado_Pago_Cliente: 'Por Cobrar', Fecha_Entrega_Estimada: '', ...initialData
+    });
+    const [calendarStatus, setCalendarStatus] = useState('');
+    const [confirmDelete, setConfirmDelete] = useState(false);
+
+    useEffect(() => {
+        // Reiniciar el estado del formulario cuando cambian los datos iniciales
+        setFormData({
+            Cliente: '', Contacto_Cliente: '', Nro_Causa: '', Tipo_Publicacion: 'Extracto',
+            Periodico_Asignado: '', Ancho: '', Alto: '', Dias_Publicacion: '', Fecha_Inicio: '',
+            Estado_Actual: 'Recibido', Direccion_Entrega: '', Canal_Adquisicion: 'LinkedIn',
+            Observaciones: '', Tarifa_Aplicada: 2.1, Valor_a_Pagar: '', Costo_Diario: 0,
+            Ganancia: 0, Estado_Pago_Cliente: 'Por Cobrar', Fecha_Entrega_Estimada: '', ...initialData
+        });
+        setConfirmDelete(false); // Reset delete confirmation on modal open/change
+    }, [initialData]);
+
+    // --- Lógica de Negocio y Cálculos ---
+    useEffect(() => {
+        const newTarifa = formData.Tipo_Publicacion === 'Convocatoria' ? 5.5 : 2.1;
+        setFormData(prev => ({ ...prev, Tarifa_Aplicada: newTarifa }));
+    }, [formData.Tipo_Publicacion]);
+
+    useEffect(() => {
+        const { Ancho, Alto, Dias_Publicacion, Tarifa_Aplicada, Valor_a_Pagar } = formData;
+        const costo = (parseFloat(Ancho||0) * parseFloat(Alto||0) * parseInt(Dias_Publicacion||0) * parseFloat(Tarifa_Aplicada||0)) * 1.15 * (1 - 0.39);
+        const ganancia = parseFloat(Valor_a_Pagar||0) - costo;
+        setFormData(prev => ({ ...prev, Costo_Diario: costo.toFixed(2), Ganancia: ganancia.toFixed(2) }));
+    }, [formData.Ancho, formData.Alto, formData.Dias_Publicacion, formData.Tarifa_Aplicada, formData.Valor_a_Pagar]);
+    
+    // --- Funcionalidad de Google Calendar ---
+    const handleScheduleEvent = async () => {
+        if (!gapi || !isGoogleSignedIn) {
+            setCalendarStatus('Error: No se ha iniciado sesión con Google.');
+            return;
+        }
+        if (!formData.Fecha_Entrega_Estimada) {
+            setCalendarStatus('Error: Por favor, establece una "Fecha de Entrega Estimada".');
+            setTimeout(() => setCalendarStatus(''), 3000);
+            return;
+        }
+        setCalendarStatus('Agendando evento...');
+
+        const event = {
+            'summary': `Entregar Publicación: ${initialData?.ID_Pub || 'N/A'} - ${formData.Cliente}`,
+            'location': formData.Direccion_Entrega,
+            'description': `Contacto: ${formData.Contacto_Cliente}\nCausa: ${formData.Nro_Causa}\n\nObservaciones:\n${formData.Observaciones}`,
+            'start': { 'date': formData.Fecha_Entrega_Estimada, 'timeZone': 'America/Guayaquil' },
+            'end': { 'date': formData.Fecha_Entrega_Estimada, 'timeZone': 'America/Guayaquil' },
+        };
+
+        try {
+            const request = gapi.client.calendar.events.insert({ 'calendarId': 'primary', 'resource': event });
+            await new Promise((resolve, reject) => {
+                request.execute(resp => resp.error ? reject(resp.error) : resolve(resp));
+            });
+            setCalendarStatus(`¡Éxito! Evento creado.`);
+        } catch (error) {
+            console.error('Error creating calendar event:', error);
+            setCalendarStatus('Error al crear el evento. Revisa la consola.');
+        }
+    };
+
+    const handleDeleteClick = () => {
+        if (confirmDelete) {
+            onDelete(initialData.id);
+        } else {
+            setConfirmDelete(true);
+        }
+    };
+
+    const handleChange = (e) => {
+        const { name, value } = e.target;
+        setFormData(prev => ({ ...prev, [name]: value }));
+    };
+
+    const handleSubmit = async (e) => { e.preventDefault(); await onSave(formData); };
+    
+    const inputClass = "w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-[#0A2342]";
+    const labelClass = "block text-sm font-medium text-gray-700 mb-1";
+    const readOnlyClass = "w-full px-3 py-2 border border-gray-200 bg-gray-100 rounded-md";
+
+    return (
+        <form onSubmit={handleSubmit}>
+            <h2 className="text-2xl font-bold text-[#0A2342] mb-6">{initialData ? 'Editar Publicación' : 'Nueva Publicación'}</h2>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                {/* Columna 1: Datos Cliente */}
+                <div className="space-y-4">
+                    <h3 className="font-semibold text-lg text-[#0A2342] border-b pb-2">Datos del Cliente</h3>
+                    <div><label className={labelClass}>Cliente</label><input type="text" name="Cliente" value={formData.Cliente} onChange={handleChange} className={inputClass} required /></div>
+                    <div><label className={labelClass}>Contacto</label><input type="text" name="Contacto_Cliente" value={formData.Contacto_Cliente} onChange={handleChange} className={inputClass} /></div>
+                    <div><label className={labelClass}>Canal Adquisición</label><select name="Canal_Adquisicion" value={formData.Canal_Adquisicion} onChange={handleChange} className={inputClass}><option>LinkedIn</option><option>Referido</option><option>Página Web</option><option>Llamada en frío</option><option>Cliente Existente</option></select></div>
+                    <div><label className={labelClass}>Dirección Entrega</label><textarea name="Direccion_Entrega" rows="3" value={formData.Direccion_Entrega} onChange={handleChange} className={inputClass}></textarea></div>
+                </div>
+
+                {/* Columna 2: Datos Publicación */}
+                <div className="space-y-4">
+                    <h3 className="font-semibold text-lg text-[#0A2342] border-b pb-2">Datos de la Publicación</h3>
+                    <div><label className={labelClass}>Nro. de Causa</label><input type="text" name="Nro_Causa" value={formData.Nro_Causa} onChange={handleChange} className={inputClass} required /></div>
+                    <div><label className={labelClass}>Tipo Publicación</label><select name="Tipo_Publicacion" value={formData.Tipo_Publicacion} onChange={handleChange} className={inputClass}><option>Extracto</option><option>Convocatoria</option><option>Citación Judicial</option><option>Demanda</option><option>Remate</option><option>Adjudicación</option><option>Notificación General</option></select></div>
+                    <div><label className={labelClass}>Periódico Asignado</label><input type="text" name="Periodico_Asignado" value={formData.Periodico_Asignado} onChange={handleChange} className={inputClass} /></div>
+                    <div className="grid grid-cols-3 gap-2">
+                        <div><label className={labelClass}>Ancho (cm)</label><input type="number" name="Ancho" value={formData.Ancho} onChange={handleChange} className={inputClass} /></div>
+                        <div><label className={labelClass}>Alto (cm)</label><input type="number" name="Alto" value={formData.Alto} onChange={handleChange} className={inputClass} /></div>
+                        <div><label className={labelClass}>Días</label><input type="number" name="Dias_Publicacion" value={formData.Dias_Publicacion} onChange={handleChange} className={inputClass} /></div>
+                    </div>
+                    <div><label className={labelClass}>Fecha de Inicio</label><input type="date" name="Fecha_Inicio" value={formData.Fecha_Inicio} onChange={handleChange} className={inputClass} /></div>
+                    <div><label className={labelClass}>Fecha Entrega Estimada</label><input type="date" name="Fecha_Entrega_Estimada" value={formData.Fecha_Entrega_Estimada} onChange={handleChange} className={inputClass} /></div>
+                </div>
+                
+                {/* Columna 3: Módulo Financiero */}
+                <div className="space-y-4 bg-gray-50 p-4 rounded-lg border">
+                    <h3 className="font-semibold text-lg text-[#0A2342] border-b pb-2">Módulo Financiero</h3>
+                    <div><label className={labelClass}>Valor a Pagar (USD)</label><input type="number" step="0.01" name="Valor_a_Pagar" value={formData.Valor_a_Pagar} onChange={handleChange} className={inputClass} /></div>
+                    <div><label className={labelClass}>Tarifa Aplicada</label><input type="text" name="Tarifa_Aplicada" value={formData.Tarifa_Aplicada} className={readOnlyClass} readOnly /></div>
+                    <div><label className={labelClass}>Costo Diario (Periódico)</label><input type="text" name="Costo_Diario" value={`$${formData.Costo_Diario}`} className={readOnlyClass} readOnly /></div>
+                    <div><label className={labelClass}>Ganancia</label><input type="text" name="Ganancia" value={`$${formData.Ganancia}`} className={`${readOnlyClass} ${formData.Ganancia < 0 ? 'text-red-600' : 'text-green-600'} font-bold`} readOnly /></div>
+                    <div><label className={labelClass}>Estado del Pago</label><select name="Estado_Pago_Cliente" value={formData.Estado_Pago_Cliente} onChange={handleChange} className={inputClass}><option>Por Cobrar</option><option>Pagado</option><option>Vencido</option></select></div>
+                    <div><label className={labelClass}>Estado Actual Proceso</label><select name="Estado_Actual" value={formData.Estado_Actual} onChange={handleChange} className={inputClass}><option>Recibido</option><option>Cotizado</option><option>Aprobado</option><option>Enviado a Prensa</option><option>Publicado</option><option>Entregado y Facturado</option><option>Archivado</option></select></div>
+                </div>
+            </div>
+            
+            {/* Sección de Integraciones */}
+            {initialData && (
+                 <div className="mt-6 pt-4 border-t">
+                    <h3 className="font-semibold text-lg text-[#0A2342] mb-3">Integraciones</h3>
+                    <div className="bg-blue-50 p-4 rounded-lg border border-blue-200 flex items-center justify-between">
+                        <div>
+                            <h4 className="font-bold text-blue-800">Google Calendar</h4>
+                            <p className="text-sm text-blue-700">Agenda la fecha de entrega directamente en tu calendario.</p>
+                             {calendarStatus && <p className="text-sm font-semibold mt-2 text-gray-600">{calendarStatus}</p>}
+                        </div>
+                        {isGoogleSignedIn ? (
+                            <button type="button" onClick={handleScheduleEvent} className="flex items-center px-4 py-2 bg-[#C3A06B] text-white font-semibold rounded-lg shadow-md hover:bg-opacity-90">
+                                <CalendarPlus className="h-5 w-5 mr-2" /> Agendar Entrega
+                            </button>
+                        ) : (
+                             <button type="button" onClick={() => handleGoogleAuthClick(tokenClient)} className="flex items-center px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg shadow-md hover:bg-blue-700">
+                                Conectar con Google
+                            </button>
+                        )}
+                    </div>
+                </div>
+            )}
+            
+            <div className="mt-8 flex justify-between items-center">
+                <div>
+                    {initialData && (
+                        <button 
+                            type="button" 
+                            onClick={handleDeleteClick}
+                            className={`flex items-center px-4 py-2 text-sm font-medium rounded-lg shadow-sm transition-colors ${confirmDelete ? 'bg-red-600 text-white hover:bg-red-700' : 'bg-transparent text-red-600 hover:bg-red-50'}`}
+                        >
+                            <Trash2 className="h-5 w-5 mr-2" />
+                            {confirmDelete ? '¿Confirmar Borrado?' : 'Eliminar'}
+                        </button>
+                    )}
+                </div>
+                <div className="space-x-4">
+                    <button type="button" onClick={onClose} className="px-6 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50">Cancelar</button>
+                    <button type="submit" className="px-6 py-2 bg-[#F4A261] text-white font-semibold rounded-md hover:bg-opacity-90">Guardar Cambios</button>
+                </div>
+            </div>
+        </form>
+    );
+};
+
+
+// --- Componente Principal de la App ---
+export default function App() {
+    const [publications, setPublications] = useState([]);
+    const [isLoading, setIsLoading] = useState(true);
+    const [isModalOpen, setIsModalOpen] = useState(false);
+    const [editingPublication, setEditingPublication] = useState(null);
+    const [searchTerm, setSearchTerm] = useState('');
+    const [statusFilter, setStatusFilter] = useState('');
+    const [paymentStatusFilter, setPaymentStatusFilter] = useState('');
+    const [sortConfig, setSortConfig] = useState({ key: 'Fecha_Creacion', direction: 'descending' });
+    
+    // Estado para Google API
+    const [gapi, setGapi] = useState(null);
+    const [tokenClient, setTokenClient] = useState(null);
+    const [isGoogleSignedIn, setIsGoogleSignedIn] = useState(false);
+
+    // Cargar script de Google API
+    useEffect(() => {
+        const script = document.createElement('script');
+        script.src = 'https://apis.google.com/js/api.js';
+        script.async = true;
+        script.defer = true;
+        script.onload = () => gapiLoaded();
+        document.body.appendChild(script);
+
+        const script2 = document.createElement('script');
+        script2.src = 'https://accounts.google.com/gsi/client';
+        script2.async = true;
+        script2.defer = true;
+        script2.onload = () => gisLoaded();
+        document.body.appendChild(script2);
+
+        return () => {
+            document.body.removeChild(script);
+            document.body.removeChild(script2);
+        }
+    }, []);
+
+    const gapiLoaded = () => {
+        window.gapi.load('client', initializeGapiClient);
+    };
+
+    const initializeGapiClient = async () => {
+        try {
+            await window.gapi.client.init({ apiKey: GOOGLE_API_KEY, discoveryDocs: [DISCOVERY_DOC] });
+            setGapi(window.gapi);
+        } catch (error) { console.error("Error initializing GAPI client:", error); }
+    };
+
+    const gisLoaded = () => {
+        try {
+            const client = window.google.accounts.oauth2.initTokenClient({
+                client_id: GOOGLE_CLIENT_ID,
+                scope: SCOPES,
+                callback: (tokenResponse) => {
+                    if (tokenResponse && tokenResponse.access_token) setIsGoogleSignedIn(true);
+                },
+            });
+            setTokenClient(client);
+        } catch (error) { console.error("Error initializing GIS client:", error); }
+    };
+    
+    const handleGoogleAuthClick = (client) => {
+        if (client) client.requestAccessToken({ prompt: 'consent' });
+    };
+
+    // --- Lógica de Firestore ---
+    useEffect(() => {
+        const q = query(publicationsCollectionRef);
+        const unsubscribe = onSnapshot(q, (querySnapshot) => {
+            const publicationsData = [];
+            querySnapshot.forEach((doc) => {
+                publicationsData.push({ ...doc.data(), id: doc.id });
+            });
+            setPublications(publicationsData);
+            setIsLoading(false);
+        }, (error) => {
+            console.error("Error fetching publications: ", error);
+            setIsLoading(false);
+        });
+        return () => unsubscribe();
+    }, []);
+
+    const getNextPublicationId = async () => {
+        const querySnapshot = await getDocs(publicationsCollectionRef);
+        let maxId = 0;
+        querySnapshot.forEach((doc) => {
+            const idNum = parseInt(doc.data().ID_Pub.split('-')[1]);
+            if (idNum > maxId) maxId = idNum;
+        });
+        return `PUB-${String(maxId + 1).padStart(3, '0')}`;
+    };
+
+    const handleSavePublication = async (formData) => {
+        if (editingPublication) {
+            // Actualizar
+            const pubDoc = doc(db, "Publicaciones", editingPublication.id);
+            const dataToUpdate = { ...formData };
+            delete dataToUpdate.id; // No guardar el id del documento dentro del propio documento
+            await updateDoc(pubDoc, dataToUpdate);
+        } else {
+            // Crear
+            const newId = await getNextPublicationId();
+            const newPublication = {
+                ...formData,
+                ID_Pub: newId,
+                Fecha_Creacion: new Date().toISOString().split('T')[0]
+            };
+            await addDoc(publicationsCollectionRef, newPublication);
+        }
+        closeModal();
+    };
+
+    const handleDeletePublication = async (docId) => {
+        const pubDoc = doc(db, "Publicaciones", docId);
+        await deleteDoc(pubDoc);
+        closeModal();
+    };
+
+    const openModalForNew = () => { setEditingPublication(null); setIsModalOpen(true); };
+    const openModalForEdit = (pub) => { setEditingPublication(pub); setIsModalOpen(true); };
+    const closeModal = () => { setIsModalOpen(false); setEditingPublication(null); };
+
+    const requestSort = (key) => {
+        let direction = 'ascending';
+        if (sortConfig.key === key && sortConfig.direction === 'ascending') direction = 'descending';
+        setSortConfig({ key, direction });
+    };
+
+    const filteredAndSortedPublications = useMemo(() => {
+        let items = [...publications].filter(pub => {
+            const s = searchTerm.toLowerCase();
+            return (s ? (pub.Cliente?.toLowerCase().includes(s) || pub.Nro_Causa?.toLowerCase().includes(s)) : true) &&
+                   (statusFilter ? pub.Estado_Actual === statusFilter : true) &&
+                   (paymentStatusFilter ? pub.Estado_Pago_Cliente === paymentStatusFilter : true);
+        });
+        items.sort((a, b) => {
+            if (a[sortConfig.key] < b[sortConfig.key]) return sortConfig.direction === 'ascending' ? -1 : 1;
+            if (a[sortConfig.key] > b[sortConfig.key]) return sortConfig.direction === 'ascending' ? 1 : -1;
+            return 0;
+        });
+        return items;
+    }, [publications, searchTerm, statusFilter, paymentStatusFilter, sortConfig]);
+
+    const SortableHeader = ({ children, name }) => (
+        <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer" onClick={() => requestSort(name)}>
+            <div className="flex items-center">{children}{sortConfig.key === name && (sortConfig.direction === 'ascending' ? <ArrowUp className="ml-2 h-4 w-4" /> : <ArrowDown className="ml-2 h-4 w-4" />)}</div>
+        </th>
+    );
+
+    return (
+        <div className="bg-gray-50 min-h-screen font-sans text-gray-800" style={{ fontFamily: 'Inter, sans-serif' }}>
+            <div className="container mx-auto p-4 sm:p-6 lg:p-8">
+                <header className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8">
+                    <div>
+                        <h1 className="text-3xl font-bold text-[#0A2342]">Publicons OS</h1>
+                        <p className="text-gray-500 mt-1">Panel de Gestión y Rentabilidad</p>
+                    </div>
+                    <button onClick={openModalForNew} className="mt-4 sm:mt-0 flex items-center px-4 py-2 bg-[#F4A261] text-white font-semibold rounded-lg shadow-md hover:bg-opacity-90"><PlusCircle className="h-5 w-5 mr-2" />Nueva Publicación</button>
+                </header>
+
+                <div className="mb-6 p-4 bg-white rounded-lg shadow grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div className="relative col-span-1 md:col-span-2">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
+                        <input type="text" placeholder="Buscar por Cliente o Causa..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full pl-10 py-2 border rounded-lg" />
+                    </div>
+                    <div><select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-full p-2 border rounded-lg bg-white"><option value="">Estado del Proceso</option><option>Recibido</option><option>Cotizado</option><option>Aprobado</option><option>Enviado a Prensa</option><option>Publicado</option><option>Entregado y Facturado</option><option>Archivado</option></select></div>
+                    <div><select value={paymentStatusFilter} onChange={(e) => setPaymentStatusFilter(e.target.value)} className="w-full p-2 border rounded-lg bg-white"><option value="">Estado del Pago</option><option>Por Cobrar</option><option>Pagado</option><option>Vencido</option></select></div>
+                </div>
+
+                <div className="bg-white shadow-lg rounded-lg overflow-hidden">
+                    <div className="overflow-x-auto">
+                        <table className="min-w-full divide-y divide-gray-200">
+                            <thead className="bg-[#0A2342]">
+                                <tr>
+                                    <SortableHeader name="ID_Pub">ID</SortableHeader><SortableHeader name="Cliente">Cliente</SortableHeader>
+                                    <SortableHeader name="Nro_Causa">Nro. Causa</SortableHeader><SortableHeader name="Estado_Actual">Estado Proceso</SortableHeader>
+                                    <SortableHeader name="Valor_a_Pagar">Valor</SortableHeader><SortableHeader name="Ganancia">Ganancia</SortableHeader>
+                                    <SortableHeader name="Estado_Pago_Cliente">Estado Pago</SortableHeader>
+                                </tr>
+                            </thead>
+                            <tbody className="bg-white divide-y divide-gray-200">
+                                {isLoading ? (<tr><td colSpan="7" className="text-center py-10">Cargando...</td></tr>) : 
+                                filteredAndSortedPublications.length > 0 ? (
+                                    filteredAndSortedPublications.map((pub) => (
+                                        <tr key={pub.id} onClick={() => openModalForEdit(pub)} className="hover:bg-gray-50 cursor-pointer">
+                                            <td className="px-6 py-4 text-sm font-medium text-[#0A2342]">{pub.ID_Pub}</td>
+                                            <td className="px-6 py-4 text-sm">{pub.Cliente}</td><td className="px-6 py-4 text-sm">{pub.Nro_Causa}</td>
+                                            <td className="px-6 py-4 text-sm"><StatusBadge status={pub.Estado_Actual} /></td>
+                                            <td className="px-6 py-4 text-sm">${parseFloat(pub.Valor_a_Pagar || 0).toFixed(2)}</td>
+                                            <td className={`px-6 py-4 text-sm font-bold ${parseFloat(pub.Ganancia || 0) < 0 ? 'text-red-600' : 'text-green-600'}`}>${parseFloat(pub.Ganancia || 0).toFixed(2)}</td>
+                                            <td className="px-6 py-4 text-sm"><PaymentStatusBadge status={pub.Estado_Pago_Cliente} /></td>
+                                        </tr>
+                                    ))
+                                ) : (<tr><td colSpan="7" className="text-center py-10">No se encontraron publicaciones.</td></tr>)}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <Modal isOpen={isModalOpen} onClose={closeModal}>
+                <PublicationForm 
+                    onSave={handleSavePublication} 
+                    onClose={closeModal} 
+                    onDelete={handleDeletePublication}
+                    initialData={editingPublication}
+                    gapi={gapi}
+                    tokenClient={tokenClient}
+                    isGoogleSignedIn={isGoogleSignedIn}
+                    handleGoogleAuthClick={handleGoogleAuthClick}
+                />
+            </Modal>
+        </div>
+    );
+}
